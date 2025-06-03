@@ -1,0 +1,173 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+  <meta charset="UTF-8" />
+  <title>WhatsApp Bulk Sender</title>
+  <script src="https://cdn.jsdelivr.net/npm/qrcode@1.5.1/build/qrcode.min.js"></script>
+  <script src="/socket.io/socket.io.js"></script>
+  <style>
+    body { font-family: Arial, sans-serif; max-width: 600px; margin: 30px auto; }
+    label { display: block; margin-top: 20px; font-weight: bold; }
+    textarea { width: 100%; height: 60px; }
+    select, input[type="file"], input[type="number"], button { margin-top: 10px; width: 100%; padding: 10px; }
+    #status { margin-top: 20px; font-weight: bold; white-space: pre-line; min-height: 50px; }
+    #qr-container { text-align: center; margin-bottom: 20px; }
+    #formEnvio { display: none; }
+  </style>
+</head>
+<body>
+  <h1>Envio de Mensagens em Massa</h1>
+
+  <div id="qr-container">
+    <h2>Escaneie o QR code para conectar ao WhatsApp</h2>
+    <canvas id="qrcode"></canvas>
+    <p id="qr-status">Aguardando QR code...</p>
+  </div>
+
+  <form id="formEnvio">
+    <label>Selecione o arquivo Excel (.xlsx) com a coluna CONTATO:</label>
+    <input type="file" id="planilha" accept=".xlsx" required />
+
+    <label>Mensagem 1:</label>
+    <textarea id="msg1" required>Olá! Esta é a mensagem 1.</textarea>
+
+    <label>Mensagem 2:</label>
+    <textarea id="msg2">Olá! Esta é a mensagem 2.</textarea>
+
+    <label>Mensagem 3:</label>
+    <textarea id="msg3">Olá! Esta é a mensagem 3.</textarea>
+
+    <label>Escolha qual mensagem enviar:</label>
+    <select id="opcaoMensagem" required>
+      <option value="1">Mensagem 1</option>
+      <option value="2">Mensagem 2</option>
+      <option value="3">Mensagem 3</option>
+      <option value="aleatorio">Aleatória</option>
+    </select>
+
+    <label>Intervalo entre mensagens (mínimo em minutos):</label>
+    <input type="number" id="intervalMin" value="3" min="3" required />
+
+    <label>Intervalo entre mensagens (máximo em minutos):</label>
+    <input type="number" id="intervalMax" value="7" min="3" required />
+
+    <button type="submit">Iniciar Envio</button>
+  </form>
+
+  <div id="status"></div>
+
+  <script>
+    const socket = io();
+
+    const qrCanvas = document.getElementById('qrcode');
+    const qrStatus = document.getElementById('qr-status');
+    const qrContainer = document.getElementById('qr-container');
+    const formEnvio = document.getElementById('formEnvio');
+    const statusDiv = document.getElementById('status');
+    const btnEnviar = formEnvio.querySelector('button');
+
+    socket.on('qr', qr => {
+      qrStatus.textContent = 'Aguardando escaneamento...';
+      QRCode.toCanvas(qrCanvas, qr, { width: 200 }, error => {
+        if (error) {
+          console.error(error);
+          qrStatus.textContent = 'Erro ao gerar QR code.';
+        }
+      });
+    });
+
+    socket.on('ready', () => {
+      qrStatus.textContent = 'WhatsApp conectado!';
+      qrCanvas.getContext('2d').clearRect(0, 0, qrCanvas.width, qrCanvas.height);
+      qrContainer.style.display = 'none';
+      formEnvio.style.display = 'block';
+    });
+
+    socket.on('envio-status', statusData => {
+      switch (statusData.status) {
+        case 'iniciado':
+          statusDiv.textContent = `Iniciando envio para ${statusData.total} contatos...\n`;
+          btnEnviar.disabled = true;
+          break;
+        case 'enviado':
+          statusDiv.textContent += `${statusData.message}\n`;
+          break;
+        case 'erro':
+          statusDiv.textContent += `❌ Erro: ${statusData.message}\n`;
+          break;
+        case 'esperando':
+          statusDiv.textContent += `${statusData.message}\n`;
+          break;
+        case 'finalizado':
+          statusDiv.textContent += '✅ Envio finalizado!\n';
+          btnEnviar.disabled = false;
+          break;
+      }
+      statusDiv.scrollTop = statusDiv.scrollHeight;
+    });
+
+    formEnvio.intervalMax.addEventListener('change', () => {
+      const min = Number(formEnvio.intervalMin.value);
+      const max = Number(formEnvio.intervalMax.value);
+      if (max < min) {
+        alert('O intervalo máximo deve ser maior ou igual ao mínimo.');
+        formEnvio.intervalMax.value = min;
+      }
+    });
+
+    formEnvio.intervalMin.addEventListener('change', () => {
+      const min = Number(formEnvio.intervalMin.value);
+      const max = Number(formEnvio.intervalMax.value);
+      if (min > max) {
+        alert('O intervalo mínimo deve ser menor ou igual ao máximo.');
+        formEnvio.intervalMin.value = max;
+      }
+    });
+
+    formEnvio.addEventListener('submit', async e => {
+      e.preventDefault();
+
+      const planilha = document.getElementById('planilha').files[0];
+      const mensagem1 = document.getElementById('msg1').value.trim();
+      const mensagem2 = document.getElementById('msg2').value.trim();
+      const mensagem3 = document.getElementById('msg3').value.trim();
+      const opcaoMensagem = document.getElementById('opcaoMensagem').value;
+      const intervalMin = document.getElementById('intervalMin').value;
+      const intervalMax = document.getElementById('intervalMax').value;
+
+      if (!planilha) {
+        statusDiv.textContent = 'Por favor, selecione um arquivo Excel.';
+        return;
+      }
+
+      const formData = new FormData();
+      formData.append('planilha', planilha);
+      formData.append('mensagem1', mensagem1);
+      formData.append('mensagem2', mensagem2);
+      formData.append('mensagem3', mensagem3);
+      formData.append('opcaoMensagem', opcaoMensagem);
+      formData.append('intervalMin', intervalMin);
+      formData.append('intervalMax', intervalMax);
+
+      statusDiv.textContent = 'Enviando mensagens... Isso pode levar alguns minutos.';
+
+      try {
+        const response = await fetch('/enviar', {
+          method: 'POST',
+          body: formData
+        });
+
+        const result = await response.json();
+
+        if (!result.success) {
+          statusDiv.textContent = '❌ Erro: ' + result.message;
+          btnEnviar.disabled = false;
+        }
+      } catch (err) {
+        statusDiv.textContent = '❌ Erro na requisição: ' + err.message;
+        btnEnviar.disabled = false;
+      }
+    });
+  </script>
+</body>
+</html>
