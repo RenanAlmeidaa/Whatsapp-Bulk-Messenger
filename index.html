@@ -2,21 +2,21 @@
 <html lang="pt-BR">
 <head>
   <meta charset="UTF-8" />
-  <title>WhatsApp Bulk Sender</title>
+  <title>Nery Auto Messenger</title>
   <script src="https://cdn.jsdelivr.net/npm/qrcode@1.5.1/build/qrcode.min.js"></script>
   <script src="/socket.io/socket.io.js"></script>
-  <style>
-    body { font-family: Arial, sans-serif; max-width: 600px; margin: 30px auto; }
-    label { display: block; margin-top: 20px; font-weight: bold; }
-    textarea { width: 100%; height: 60px; }
-    select, input[type="file"], input[type="number"], button { margin-top: 10px; width: 100%; padding: 10px; }
-    #status { margin-top: 20px; font-weight: bold; white-space: pre-line; min-height: 50px; }
-    #qr-container { text-align: center; margin-bottom: 20px; }
-    #formEnvio { display: none; }
-  </style>
+  <link rel="stylesheet" href="style.css" />
 </head>
 <body>
-  <h1>Envio de Mensagens em Massa</h1>
+  <h1>Disparo Automático</h1>
+
+  <!-- Dark Mode Toggle -->
+  <div class="darkmode-switch">
+    <label class="switch">
+      <input type="checkbox" id="darkmode-toggle" />
+      <span class="slider"></span>
+    </label>
+  </div>
 
   <div id="qr-container">
     <h2>Escaneie o QR code para conectar ao WhatsApp</h2>
@@ -24,7 +24,7 @@
     <p id="qr-status">Aguardando QR code...</p>
   </div>
 
-  <form id="formEnvio">
+  <form id="formEnvio" style="display:none;">
     <label>Selecione o arquivo Excel (.xlsx) com a coluna CONTATO:</label>
     <input type="file" id="planilha" accept=".xlsx" required />
 
@@ -54,25 +54,77 @@
     <button type="submit">Iniciar Envio</button>
   </form>
 
+  <!-- Botão de Pausar / Retomar -->
+  <div id="pauseResumeContainer" style="display:none; margin-top: 15px; text-align:center;">
+    <button id="pauseResumeBtn" class="btn-primary">Pausar</button>
+  </div>
+
   <div id="status"></div>
 
   <script>
-    const socket = io();
-
+    const socket = io('http://localhost:3000');
     const qrCanvas = document.getElementById('qrcode');
     const qrStatus = document.getElementById('qr-status');
     const qrContainer = document.getElementById('qr-container');
     const formEnvio = document.getElementById('formEnvio');
     const statusDiv = document.getElementById('status');
     const btnEnviar = formEnvio.querySelector('button');
+    const pauseResumeContainer = document.getElementById('pauseResumeContainer');
+    const pauseResumeBtn = document.getElementById('pauseResumeBtn');
+    let paused = false;
+
+    // Mensagens e intervalos salvos no localStorage
+    function saveMessage(id) {
+      const el = document.getElementById(id);
+      if (el) localStorage.setItem(id, el.value);
+    }
+    function loadMessage(id, defaultValue) {
+      const saved = localStorage.getItem(id);
+      const el = document.getElementById(id);
+      if (el) el.value = saved !== null ? saved : defaultValue;
+    }
+    function saveInterval(id) {
+      const el = document.getElementById(id);
+      if (el) localStorage.setItem(id, el.value);
+    }
+    function loadInterval(id, defaultValue) {
+      const saved = localStorage.getItem(id);
+      const el = document.getElementById(id);
+      if (el) el.value = saved !== null ? saved : defaultValue;
+    }
+
+    window.addEventListener('DOMContentLoaded', async () => {
+      loadMessage('msg1', 'Olá! Esta é a mensagem 1.');
+      loadMessage('msg2', 'Olá! Esta é a mensagem 2.');
+      loadMessage('msg3', 'Olá! Esta é a mensagem 3.');
+      loadInterval('intervalMin', '3');
+      loadInterval('intervalMax', '7');
+
+      // Verificar se existe progresso salvo
+      try {
+        const resp = await fetch('/progresso');
+        const prog = await resp.json();
+        if (prog && prog.fileName) {
+          statusDiv.textContent = `📂 Progresso salvo detectado para arquivo \"${prog.fileName}\". Última posição: linha ${prog.index + 2}.\nRecarregue o mesmo arquivo para continuar.`;
+        }
+      } catch (e) {
+        console.warn('Erro ao buscar progresso salvo:', e);
+      }
+    });
+
+    ['msg1', 'msg2', 'msg3'].forEach(id => {
+      const el = document.getElementById(id);
+      el.addEventListener('input', () => saveMessage(id));
+    });
+    ['intervalMin', 'intervalMax'].forEach(id => {
+      const el = document.getElementById(id);
+      el.addEventListener('input', () => saveInterval(id));
+    });
 
     socket.on('qr', qr => {
       qrStatus.textContent = 'Aguardando escaneamento...';
-      QRCode.toCanvas(qrCanvas, qr, { width: 200 }, error => {
-        if (error) {
-          console.error(error);
-          qrStatus.textContent = 'Erro ao gerar QR code.';
-        }
+      QRCode.toCanvas(qrCanvas, qr, { width: 200 }, err => {
+        if (err) qrStatus.textContent = 'Erro ao gerar QR code.';
       });
     });
 
@@ -81,6 +133,7 @@
       qrCanvas.getContext('2d').clearRect(0, 0, qrCanvas.width, qrCanvas.height);
       qrContainer.style.display = 'none';
       formEnvio.style.display = 'block';
+      pauseResumeContainer.style.display = 'block';
     });
 
     socket.on('envio-status', statusData => {
@@ -88,22 +141,34 @@
         case 'iniciado':
           statusDiv.textContent = `Iniciando envio para ${statusData.total} contatos...\n`;
           btnEnviar.disabled = true;
+          pauseResumeBtn.disabled = false;
+          paused = false;
+          pauseResumeBtn.textContent = 'Pausar';
           break;
         case 'enviado':
-          statusDiv.textContent += `${statusData.message}\n`;
-          break;
         case 'erro':
-          statusDiv.textContent += `❌ Erro: ${statusData.message}\n`;
-          break;
         case 'esperando':
           statusDiv.textContent += `${statusData.message}\n`;
           break;
         case 'finalizado':
           statusDiv.textContent += '✅ Envio finalizado!\n';
           btnEnviar.disabled = false;
+          pauseResumeBtn.disabled = true;
+          break;
+        case 'pausado':
+          statusDiv.textContent += '⏸️ Envio pausado.\n';
+          break;
+        case 'retomado':
+          statusDiv.textContent += '▶️ Envio retomado.\n';
           break;
       }
       statusDiv.scrollTop = statusDiv.scrollHeight;
+    });
+
+    pauseResumeBtn.addEventListener('click', () => {
+      paused = !paused;
+      pauseResumeBtn.textContent = paused ? 'Retomar' : 'Pausar';
+      socket.emit('toggle-pause', paused);
     });
 
     formEnvio.intervalMax.addEventListener('change', () => {
@@ -126,12 +191,11 @@
 
     formEnvio.addEventListener('submit', async e => {
       e.preventDefault();
-
       const planilha = document.getElementById('planilha').files[0];
-      const mensagem1 = document.getElementById('msg1').value.trim();
-      const mensagem2 = document.getElementById('msg2').value.trim();
-      const mensagem3 = document.getElementById('msg3').value.trim();
-      const opcaoMensagem = document.getElementById('opcaoMensagem').value;
+      const msg1 = document.getElementById('msg1').value.trim();
+      const msg2 = document.getElementById('msg2').value.trim();
+      const msg3 = document.getElementById('msg3').value.trim();
+      const opcao = document.getElementById('opcaoMensagem').value;
       const intervalMin = document.getElementById('intervalMin').value;
       const intervalMax = document.getElementById('intervalMax').value;
 
@@ -142,31 +206,43 @@
 
       const formData = new FormData();
       formData.append('planilha', planilha);
-      formData.append('mensagem1', mensagem1);
-      formData.append('mensagem2', mensagem2);
-      formData.append('mensagem3', mensagem3);
-      formData.append('opcaoMensagem', opcaoMensagem);
+      formData.append('mensagem1', msg1);
+      formData.append('mensagem2', msg2);
+      formData.append('mensagem3', msg3);
+      formData.append('opcaoMensagem', opcao);
       formData.append('intervalMin', intervalMin);
       formData.append('intervalMax', intervalMax);
 
-      statusDiv.textContent = 'Enviando mensagens... Isso pode levar alguns minutos.';
+      statusDiv.textContent = 'Enviando mensagens...';
 
       try {
         const response = await fetch('/enviar', {
           method: 'POST',
           body: formData
         });
-
         const result = await response.json();
-
         if (!result.success) {
           statusDiv.textContent = '❌ Erro: ' + result.message;
           btnEnviar.disabled = false;
+          pauseResumeBtn.disabled = true;
         }
       } catch (err) {
-        statusDiv.textContent = '❌ Erro na requisição: ' + err.message;
+        statusDiv.textContent = '❌ Erro: ' + err.message;
         btnEnviar.disabled = false;
+        pauseResumeBtn.disabled = true;
       }
+    });
+
+    // Dark mode
+    const toggleSwitch = document.getElementById('darkmode-toggle');
+    if (localStorage.getItem('darkMode') === 'true') {
+      document.body.classList.add('dark');
+      toggleSwitch.checked = true;
+    }
+    toggleSwitch.addEventListener('change', () => {
+      const isDark = toggleSwitch.checked;
+      document.body.classList.toggle('dark', isDark);
+      localStorage.setItem('darkMode', isDark);
     });
   </script>
 </body>
