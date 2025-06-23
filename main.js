@@ -1,6 +1,5 @@
-const { app, BrowserWindow, ipcMain } = require('electron');
+const { app, BrowserWindow } = require('electron');
 const path = require('path');
-
 const express = require('express');
 const multer = require('multer');
 const xlsx = require('xlsx');
@@ -13,8 +12,8 @@ const puppeteer = require('puppeteer');
 const expressApp = express();
 const server = http.createServer(expressApp);
 const io = new Server(server);
-
 const port = 3000;
+
 const uploadsDir = path.join(__dirname, 'uploads');
 if (!fs.existsSync(uploadsDir)) fs.mkdirSync(uploadsDir);
 
@@ -27,20 +26,29 @@ const log = msg => {
   fs.appendFileSync(path.join(__dirname, 'log.txt'), line + '\n');
 };
 
-// Serve arquivos estáticos
 expressApp.use(express.static(path.join(__dirname, 'public')));
 expressApp.use(express.json());
 expressApp.use(express.urlencoded({ extended: true }));
 
 let whatsappClient;
+let pauseSending = false;
+let stopSending = false;
 
-// Endpoint status
 expressApp.get('/status', (req, res) => {
   const connected = whatsappClient && whatsappClient.info?.wid;
   res.json({ ready: !!connected });
 });
 
-// Endpoint envio
+expressApp.get('/progresso', (req, res) => {
+  const progressoPath = path.join(__dirname, 'progresso.json');
+  if (fs.existsSync(progressoPath)) {
+    const saved = JSON.parse(fs.readFileSync(progressoPath, 'utf-8'));
+    res.json(saved);
+  } else {
+    res.json(null);
+  }
+});
+
 expressApp.post('/enviar', upload.single('planilha'), async (req, res) => {
   try {
     if (!whatsappClient || !whatsappClient.info?.wid) {
@@ -54,9 +62,23 @@ expressApp.post('/enviar', upload.single('planilha'), async (req, res) => {
       intervalMin, intervalMax
     } = req.body;
 
+    pauseSending = false;
+    stopSending = false;
+
     const filePath = req.file.path;
+    const fileName = req.file.originalname;
     const workbook = xlsx.readFile(filePath);
     const contatos = xlsx.utils.sheet_to_json(workbook.Sheets[workbook.SheetNames[0]]);
+
+    const progressoPath = path.join(__dirname, 'progresso.json');
+    let progresso = { fileName, index: 0 };
+
+    if (fs.existsSync(progressoPath)) {
+      const saved = JSON.parse(fs.readFileSync(progressoPath, 'utf-8'));
+      if (saved.fileName === fileName) {
+        progresso.index = saved.index;
+      }
+    }
 
     const escolheMensagem = () => {
       if (opcaoMensagem === '1') return mensagem1;
@@ -71,18 +93,32 @@ expressApp.post('/enviar', upload.single('planilha'), async (req, res) => {
 
     io.emit('envio-status', { status: 'iniciado', total: contatos.length });
 
-    for (const [index, linha] of contatos.entries()) {
+    for (let index = progresso.index + 1; index < contatos.length; index++) {
+      if (stopSending) {
+        log('Envio interrompido pelo usuário');
+        io.emit('envio-status', { status: 'interrompido', message: 'Envio interrompido pelo usuário.' });
+        break;
+      }
+
+      while (pauseSending) {
+        await new Promise(r => setTimeout(r, 1000));
+      }
+
+      const linha = contatos[index];
       const numeroRaw = linha.CONTATO;
       const numeroLimpo = numeroRaw?.toString().replace(/\D/g, '');
       if (!numeroLimpo) {
         const erro = `❌ Número inválido na linha ${index + 2}`;
         log(erro);
-        io.emit('envio-status', { status: 'erro', message: erro });
+        io.emit('envio-status', { status: 'erro', message: 'Número inválido (linha ' + (index + 2) + ')' });
         continue;
       }
 
       const numero = `55${numeroLimpo}@c.us`;
-      const mensagem = escolheMensagem();
+      const mensagemBase = escolheMensagem();
+      const mensagem = mensagemBase.replace(/{([^}]+)}/g, (_, chave) => {
+        return linha[chave] ?? `{${chave}}`;
+      });
 
       try {
         const numberId = await whatsappClient.getNumberId(numero);
@@ -94,6 +130,9 @@ expressApp.post('/enviar', upload.single('planilha'), async (req, res) => {
         }
 
         await whatsappClient.sendMessage(numberId._serialized, mensagem);
+        progresso.index = index;
+        fs.writeFileSync(progressoPath, JSON.stringify(progresso));
+
         const sucesso = `✅ Mensagem enviada para ${numeroLimpo}`;
         log(sucesso);
         io.emit('envio-status', { status: 'enviado', message: sucesso });
@@ -111,6 +150,7 @@ expressApp.post('/enviar', upload.single('planilha'), async (req, res) => {
       }
     }
 
+    if (fs.existsSync(progressoPath)) fs.unlinkSync(progressoPath);
     io.emit('envio-status', { status: 'finalizado' });
     res.json({ success: true, message: 'Mensagens enviadas!' });
 
@@ -121,12 +161,28 @@ expressApp.post('/enviar', upload.single('planilha'), async (req, res) => {
   }
 });
 
-// Inicializa WhatsApp
+io.on('connection', socket => {
+  socket.on('toggle-pause', (paused) => {
+    pauseSending = paused;
+    if (paused) {
+      log('Envio pausado pelo usuário');
+      io.emit('envio-status', { status: 'pausado', message: 'Envio pausado pelo usuário.' });
+    } else {
+      log('Envio retomado pelo usuário');
+      io.emit('envio-status', { status: 'retomado', message: 'Envio retomado pelo usuário.' });
+    }
+  });
+
+  socket.on('stop', () => {
+    stopSending = true;
+    pauseSending = false;
+    log('Envio interrompido pelo usuário');
+  });
+});
+
 const startWhatsApp = async () => {
   whatsappClient = new Client({
-    authStrategy: new LocalAuth({
-      dataPath: path.join(__dirname, 'session')
-    }),
+    authStrategy: new LocalAuth({ dataPath: path.join(__dirname, 'session') }),
     puppeteer: {
       headless: true,
       executablePath: puppeteer.executablePath(),
@@ -144,56 +200,34 @@ const startWhatsApp = async () => {
     io.emit('ready');
   });
 
-  whatsappClient.on('auth_failure', msg => {
-    log('Falha de autenticação: ' + msg);
-  });
-
-  whatsappClient.on('disconnected', reason => {
-    log('Desconectado: ' + reason);
-  });
+  whatsappClient.on('auth_failure', msg => log('Falha de autenticação: ' + msg));
+  whatsappClient.on('disconnected', reason => log('Desconectado: ' + reason));
 
   log('Iniciando WhatsApp...');
   whatsappClient.initialize();
 };
 
-// Start server Express
 server.listen(port, () => {
   log(`Servidor rodando em http://localhost:${port}`);
   startWhatsApp();
 });
 
-// --- Código Electron ---
-
 let mainWindow;
-
 function createWindow() {
   mainWindow = new BrowserWindow({
     width: 700,
     height: 850,
+    icon: path.join(__dirname, 'icon.ico'),
     webPreferences: {
       nodeIntegration: false,
       contextIsolation: true,
-      preload: path.join(__dirname, 'preload.js') // caso precise de preload
+      preload: path.join(__dirname, 'preload.js')
     }
   });
-
-  // Abrir a página do Express no Electron
   mainWindow.loadURL(`http://localhost:${port}`);
-
-  mainWindow.on('closed', () => {
-    mainWindow = null;
-  });
+  mainWindow.on('closed', () => mainWindow = null);
 }
 
 app.whenReady().then(createWindow);
-
-app.on('window-all-closed', () => {
-  // Fecha app no macOS só quando explicitamente fechar
-  if (process.platform !== 'darwin') {
-    app.quit();
-  }
-});
-
-app.on('activate', () => {
-  if (mainWindow === null) createWindow();
-});
+app.on('window-all-closed', () => { if (process.platform !== 'darwin') app.quit(); });
+app.on('activate', () => { if (mainWindow === null) createWindow(); });
