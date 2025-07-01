@@ -1,4 +1,4 @@
-const { app, BrowserWindow } = require('electron');
+const { app, BrowserWindow, dialog } = require('electron');
 const path = require('path');
 const express = require('express');
 const multer = require('multer');
@@ -8,12 +8,15 @@ const http = require('http');
 const { Server } = require('socket.io');
 const { Client, LocalAuth } = require('whatsapp-web.js');
 const puppeteer = require('puppeteer');
+const https = require('https');
+const crypto = require('crypto');
 
 const expressApp = express();
 const server = http.createServer(expressApp);
 const io = new Server(server);
 const port = 3000;
 
+// Diretório de uploads
 const uploadsDir = path.join(__dirname, 'uploads');
 if (!fs.existsSync(uploadsDir)) fs.mkdirSync(uploadsDir);
 
@@ -25,6 +28,44 @@ const log = msg => {
   console.log(line);
   fs.appendFileSync(path.join(__dirname, 'log.txt'), line + '\n');
 };
+
+// Verificação por ID único da máquina
+const idPath = path.join(app.getPath('userData'), 'machine-id.txt');
+let machineId;
+
+if (fs.existsSync(idPath)) {
+  machineId = fs.readFileSync(idPath, 'utf8');
+} else {
+  machineId = crypto.randomUUID();
+  fs.writeFileSync(idPath, machineId);
+  console.log('🆔 ID gerado para esta máquina:', machineId);
+}
+
+async function verificarAtivacao(id) {
+  return new Promise((resolve) => {
+    https.get('https://gist.githubusercontent.com/RenanAlmeidaa/2bd950942e9361cc9ceba588d627f28f/raw/controle-app.json', (res) => {
+      let data = '';
+      res.on('data', chunk => data += chunk);
+      res.on('end', () => {
+        try {
+          const json = JSON.parse(data);
+          console.log('🔎 JSON recebido do Gist:', json);
+          console.log('🔍 Verificando ID da máquina:', id);
+          const autorizado = json.autorizados.includes(id);
+          console.log('✅ Autorizado?', autorizado);
+          resolve(autorizado);
+        } catch (e) {
+          console.log('❌ Erro ao processar JSON:', e.message);
+          resolve(false);
+        }
+      });
+    }).on('error', (err) => {
+      console.log('❌ Erro ao acessar o Gist:', err.message);
+      resolve(false);
+    });
+  });
+}
+
 
 expressApp.use(express.static(path.join(__dirname, 'public')));
 expressApp.use(express.json());
@@ -228,6 +269,15 @@ function createWindow() {
   mainWindow.on('closed', () => mainWindow = null);
 }
 
-app.whenReady().then(createWindow);
+app.whenReady().then(async () => {
+  const liberado = await verificarAtivacao(machineId);
+  if (!liberado) {
+    dialog.showErrorBox('Bloqueado', 'Este dispositivo não está autorizado a usar este aplicativo.');
+    app.quit();
+    return;
+  }
+  createWindow();
+});
+
 app.on('window-all-closed', () => { if (process.platform !== 'darwin') app.quit(); });
 app.on('activate', () => { if (mainWindow === null) createWindow(); });
