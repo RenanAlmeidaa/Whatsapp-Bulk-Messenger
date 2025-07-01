@@ -1,4 +1,4 @@
-# NERY AUTO MESSENGER 
+# AUTO MESSENGER 
 Envio de mensagens automáticas pelo whatsapp com planilhas.
 
 Como instalar?
